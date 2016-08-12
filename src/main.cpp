@@ -11,6 +11,12 @@
 #include <boost/program_options.hpp>
 #include <boost/timer.hpp>
 #include <whycon/localization_system.h>
+
+#include "Source.h"
+#include "Sink.h"
+#include "SharedFrameHeader.h"
+#include "Frame.h"
+
 using namespace std;
 namespace po = boost::program_options;
 
@@ -87,8 +93,8 @@ po::variables_map process_commandline(int argc, char** argv)
     if (!config_vars.count("mat") && !config_vars.count("xml"))
       throw std::runtime_error("Please specify one source for calibration parameters");
       
-    if (!config_vars.count("cam") && !config_vars.count("video") && !config_vars.count("img"))
-      throw std::runtime_error("Please specify one input source");
+    //if (!config_vars.count("cam") && !config_vars.count("video") && !config_vars.count("img"))
+    //  throw std::runtime_error("Please specify one input source");
 
     if (config_vars.count("width") != config_vars.count("height"))
       throw std::runtime_error("Please specify both width and height for camera resolution");
@@ -131,30 +137,53 @@ po::variables_map process_commandline(int argc, char** argv)
   return config_vars;
 }
 
+// HACK!
+// Frame source
+const std::string frame_source_address_ {"raw"};
+oat::Source<oat::SharedFrameHeader> frame_source_;
+oat::Frame shared_frame_;
+cv::Size frame_size;
+void connectToNode() {
+
+    // Establish our a slot in the node
+    frame_source_.touch(frame_source_address_);
+
+    // Wait for sychronous start with sink when it binds the node
+    frame_source_.connect();
+
+    // Get frame meta data to format sink
+    oat::Source<oat::SharedFrameHeader>::ConnectionParameters param =
+            frame_source_.parameters();
+
+    frame_size.height = param.rows; 
+    frame_size.width = param.cols; 
+}
 
 int main(int argc, char** argv)
 {
   signal(SIGINT, interrupt);
 
+  connectToNode();
+
   /* process command line */
   po::variables_map config_vars = process_commandline(argc, argv);
 
   /* setup input */
-  bool is_camera = config_vars.count("cam");
-  cv::VideoCapture capture;
-  if (is_camera) {
-    int cam_id = config_vars["cam"].as<int>();
-    capture.open(cam_id);
-    if (config_vars.count("width")) {
-      capture.set(CV_CAP_PROP_FRAME_WIDTH, config_vars["width"].as<int>());
-      capture.set(CV_CAP_PROP_FRAME_HEIGHT, config_vars["height"].as<int>());
-    }
-  }
-  else {
-    std::string video_name(config_vars.count("img") ? config_vars["img"].as<string>() : config_vars["video"].as<string>());
-    capture.open(video_name);    
-  }
-  if (!capture.isOpened()) { cout << "error opening camera/video" << endl; return 1; }
+  //bool is_camera = config_vars.count("cam");
+  //cv::VideoCapture capture;
+  //if (is_camera) {
+  //  int cam_id = config_vars["cam"].as<int>();
+  //  capture.open(cam_id);
+  //  if (config_vars.count("width")) {
+  //    capture.set(CV_CAP_PROP_FRAME_WIDTH, config_vars["width"].as<int>());
+  //    capture.set(CV_CAP_PROP_FRAME_HEIGHT, config_vars["height"].as<int>());
+  //  }
+  //}
+  //else {
+  //  std::string video_name(config_vars.count("img") ? config_vars["img"].as<string>() : config_vars["video"].as<string>());
+  //  capture.open(video_name);    
+  //}
+  //if (!capture.isOpened()) { cout << "error opening camera/video" << endl; return 1; }
 
   /* load calibration */
   cv::Mat K, dist_coeff;
@@ -165,8 +194,7 @@ int main(int argc, char** argv)
 
   /* init system */
   
-  cv::Size frame_size(capture.get(CV_CAP_PROP_FRAME_WIDTH), capture.get(CV_CAP_PROP_FRAME_HEIGHT));
-  cout << "frame size: " << frame_size << endl;
+  //cout << "frame size: " << frame_size << endl;
   float inner_diameter = (custom_diameter ? config_vars["inner-diameter"].as<float>() : WHYCON_DEFAULT_INNER_DIAMETER);
   float outer_diameter = (custom_diameter ? config_vars["outer-diameter"].as<float>() : WHYCON_DEFAULT_OUTER_DIAMETER);
   cv::LocalizationSystem system(number_of_targets, frame_size.width, frame_size.height, K, dist_coeff,
@@ -199,25 +227,35 @@ int main(int argc, char** argv)
   
   /* setup gui and start capturing / processing */
   bool is_tracking = false;
-  if (!is_camera) clicked = true; // when not using camera, emulate user click so that tracking starts immediately
-  cv::Mat original_frame, frame;
+  //if (!is_camera) clicked = true; // when not using camera, emulate user click so that tracking starts immediately
+  oat::Frame original_frame, frame;
   long frame_idx = 0;
 
   /* read axis from file when in tracking mode */
   if (do_tracking) {
     if (load_axis) {
       cout << "loading axis definition file" << endl;
-      system.read_axis(config_vars["axis"].as<string>());
+      system.read_axis(config_vars["axis"].as<string>(), 1, 1);
     }
     else cout << "coordinate transform disabled" << endl;
   }
 
-  int max_attempts = is_camera ? 1 : 5;
-  int refine_steps = is_camera ? 1 : 15;
+  int max_attempts = 1; //is_camera ? 1 : 5;
+  int refine_steps = 1; //is_camera ? 1 : 15;
 
   while (!stop)
   {
-    if (!capture.read(original_frame)) { cout << "no more frames left to read" << endl; break; }
+      
+    // Wait for sink to write to node
+    if (frame_source_.wait() == oat::NodeState::END)
+        break;
+
+    // Clone the shared frame
+    oat::Frame original_frame;
+    frame_source_.copyTo(original_frame);
+
+    // Tell sink it can continue
+    frame_source_.post();
 
     #if defined(ENABLE_FULL_UNDISTORT)
     cv::Mat undistorted;
@@ -228,7 +266,7 @@ int main(int argc, char** argv)
     original_frame.copyTo(frame);
 
     if (!do_tracking) {
-      if (!is_camera || clicked) {
+      if (clicked) {
         bool axis_was_set = system.set_axis(original_frame, max_attempts, refine_steps, config_vars["set-axis"].as<string>());
         if (!axis_was_set) throw std::runtime_error("Error setting axis!");      
         system.draw_axis(frame);
@@ -238,7 +276,7 @@ int main(int argc, char** argv)
       if (use_gui) cv::imshow("output", frame);
     }
     else {
-      if (!use_gui || !is_camera || clicked) {
+      if (!use_gui || clicked) {
         if (!is_tracking) cout << "resetting targets" << endl;
 
         int64_t ticks = cv::getTickCount();

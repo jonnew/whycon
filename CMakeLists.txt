@@ -14,6 +14,14 @@ option(ENABLE_RANDOMIZED_THRESHOLD "Use rand() instead of binary-like search for
 option(ENABLE_VERBOSE "Enable verbose console messages during detection" OFF)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/config.h.cmake ${CMAKE_CURRENT_SOURCE_DIR}/include/whycon/config.h)
 
+# Threads
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package (Threads REQUIRED)
+if(CMAKE_THREAD_LIBS_INIT)
+    set (Thread_LIBS ${CMAKE_THREAD_LIBS_INIT} rt)
+    message (STATUS "Found threading libs: ${Thread_LIBS}")
+endif()
+
 #### ROS CONFIGURATION ####
 if(NOT DISABLE_ROS)
   find_package(catkin REQUIRED COMPONENTS
@@ -51,7 +59,8 @@ endif()
 
 ### SYSTEM DEPENDENCIES ###
 find_package(OpenCV REQUIRED)
-find_package(Boost COMPONENTS program_options thread system REQUIRED)
+find_package (Boost 1.56.0 REQUIRED system thread program_options filesystem)
+#find_package(Boost COMPONENTS program_options thread system REQUIRED)
 
 ### TARGETS ###
 include_directories(
@@ -59,7 +68,7 @@ include_directories(
 )
 
 add_library(whycon SHARED src/lib/circle_detector.cpp src/lib/many_circle_detector.cpp src/lib/localization_system.cpp)
-target_link_libraries(whycon ${OpenCV_LIBS} ${Boost_LIBRARIES})
+target_link_libraries(whycon ${OpenCV_LIBS} ${Boost_LIBRARIES} ${Thread_LIBS})
 
 if(NOT DISABLE_ROS)
   add_executable(whycon-node src/ros/whycon_node.cpp src/ros/whycon_ros.cpp)
